@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 def load_inception_v3():
     from inception_v3 import build_network
     net = build_network()
-    data = pickle.load(open("inception_v3.pkl","rb"))
+    data = pickle.load(open('inception_v3.pkl', 'rb'), encoding='latin1')
     weights = data["param values"]
     lasagne.layers.helper.set_all_param_values(net["softmax"], weights)
     return net, np.array([104, 117, 123]).reshape(1,3,1,1).astype("float32")
@@ -40,16 +40,18 @@ class Dataset:
     def __init__(self, path):
         self.path = path
 
+        self.train_classes = np.array(range(100)) + 1
+
         # We could preload whole birds dataset to memory
-        with open(os.path.join(self.path, 'image_class_labels.txt'), 'rb') as f:
+        with open(os.path.join(self.path, 'image_class_labels.txt'), 'r') as f:
             lines = [l.rstrip('\n').split(' ') for l in f.readlines()]
             self.imgid2class = {int(l[0]): int(l[1]) for l in lines}
 
-        with open(os.path.join(self.path, 'images.txt'), 'rb') as f:
+        with open(os.path.join(self.path, 'images.txt'), 'r') as f:
             lines = [l.rstrip('\n').split(' ') for l in f.readlines()]
             self.imgid2image = {int(l[0]):os.path.join(path, 'images', l[1]) for l in lines}
 
-        self.n_classes = len(np.unique(np.array(self.imgid2class.values())))
+        self.n_classes = len(np.unique(np.array(list(self.imgid2class.values()))))
 
     def _gen_data(self, size, filter_fn):
         from inception_v3 import preprocess
@@ -73,18 +75,35 @@ class Dataset:
                 labels.append(imgclass)
         return np.concatenate(images), np.array(labels).astype(np.int32)
 
+    def images_for_class(self, cid):
+        from inception_v3 import preprocess
+        images = []
+
+        for imgid, imgclass in self.imgid2class.items():
+            if imgclass != cid:
+                continue
+            imgpath = self.imgid2image[imgid]
+            img = sp.ndimage.imread(imgpath)
+
+            # fix for grayscale images
+            if len(img.shape)==2:
+                img = np.rollaxis(np.stack([img, img, img]), 0, 3)
+
+            images.append(preprocess(img))
+
+        return np.vstack(images)
 
     def train_batch(self, size=32):
-        return self._gen_data(size, lambda i, c: c <= 100)
+        return self._gen_data(size, lambda i, c: c in self.train_classes)
 
     def valid_batch(self, size=1024):
-        return self._gen_data(size, lambda i, c: c > 100)
+        return self._gen_data(size, lambda i, c: c not in self.train_classes)
 
 data = Dataset('/home/rakhunzy/workspace/data/CUB_200_2011')
 
 # In[]
-train_batch, train_labels = data.train_batch()
-valid_set, valid_labels = data.valid_batch()
+train_batch, train_labels = data.train_batch(32)
+valid_set, valid_labels = data.valid_batch(128)
 
 # In[]
 def nca_loss(targets, embeddings, proxies_layer):
@@ -133,8 +152,17 @@ def nca_loss(targets, embeddings, proxies_layer):
 l_in_labels = lasagne.layers.InputLayer((None,))
 l_in_images = inception_net['input']
 
-init_proxies = np.random.randn(data.n_classes, embedding_layer.output_shape[1]).astype('float32')
-proxies_layer = lasagne.layers.EmbeddingLayer(l_in_labels, input_size=data.n_classes, output_size=embedding_layer.output_shape[1], W=init_proxies)
+init_proxies = np.random.randn(len(data.train_classes), embedding_layer.output_shape[1]).astype('float32')
+
+for imgclass in data.train_classes:
+    print('Init proxy for class {}'.format(imgclass))
+    class_images = data.images_for_class(imgclass)
+    class_embeddings = compute_embedding(class_images)
+    init_proxies[imgclass-1] = class_embeddings.mean(axis=0)
+
+# In[]
+n_train_classes = len(data.train_classes)
+proxies_layer = lasagne.layers.EmbeddingLayer(l_in_labels, input_size=n_train_classes, output_size=embedding_layer.output_shape[1], W=init_proxies)
 
 # In[]
 
@@ -149,22 +177,35 @@ loss = nca_loss(in_labels, image_embdeddings, proxies_layer)
 
 params = lasagne.layers.get_all_params([proxies_layer, embedding_layer], trainable=True)
 
-updates = lasagne.updates.rmsprop(loss, params, learning_rate=1.0)
+updates = lasagne.updates.rmsprop(loss, params, learning_rate=0.0001)
 
-[i.__dict__['type'] for i in params]
-
+#[i.__dict__['type'] for i in params]
 
 # In[]
 train_fn = theano.function(inputs=[in_images, in_labels], outputs=loss, updates=updates)
 validate_fn = theano.function(inputs=[in_images, in_labels], outputs=loss)
 
-
-
 # In[] Debug code goes below
-theano.config.exception_verbosity='high'
-train_loss = train_fn(train_batch[:8], [train_labels[:8]])
-valid_loss = validate_fn(train_batch[:8], [train_labels[:8]])
+
+#theano.config.exception_verbosity='high'
+train_loss = train_fn(train_batch[:8], [train_labels[:8]-1])
+valid_loss = validate_fn(train_batch[:8], [train_labels[:8]-1])
 print(train_loss)
+
+# In[]
+proxies = np.array(proxies_layer.W.eval())
+for i in range(len(proxies)):
+    print((proxies[0] - init_proxies[0]).sum())
+
+# In[]
+i = 0
+for i in range(50):
+    train_batch, train_labels = data.train_batch()
+    train_loss = train_fn(train_batch[:8], [train_labels[:8]-1])
+    print('epoch {} loss: {}'.format(i, train_loss))
+    class_embeddings = np.array(compute_embedding(class_images))
+    class_embeddings_mean = np.array(class_embeddings.mean(axis=0))
+    print(np.sum(class_embeddings_mean - init_proxies[-1]))
 
 # In[]
 
