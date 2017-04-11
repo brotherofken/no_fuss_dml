@@ -292,16 +292,17 @@ def build_cnn(input_var=None):
 
     # Convolutional layer with 32 kernels of size 5x5. Strided and padded
     # convolutions are supported as well; see the docstring.
-    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(5, 5), nonlinearity=lasagne.nonlinearities.rectify,
+    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(5, 5), nonlinearity=lasagne.nonlinearities.leaky_rectify,
                                          W=lasagne.init.GlorotUniform())
     network = lasagne.layers.MaxPool2DLayer(network, pool_size=(2, 2))
 
-    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(5, 5), nonlinearity=lasagne.nonlinearities.rectify,
+    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(5, 5), nonlinearity=lasagne.nonlinearities.leaky_rectify,
                                          W=lasagne.init.GlorotUniform())
     network = lasagne.layers.MaxPool2DLayer(network, pool_size=(2, 2))
 
     # A fully-connected layer of 256 units with 50% dropout on its inputs:
-    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=0.5), num_units=2, nonlinearity=lasagne.nonlinearities.tanh)
+    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.5), num_units=8, nonlinearity=lasagne.nonlinearities.leaky_rectify)
+    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.01), num_units=2, nonlinearity=lasagne.nonlinearities.tanh)
 
     # And, finally, the 10-unit output layer with 50% dropout on its inputs:
 #    network = lasagne.layers.DenseLayer(
@@ -340,25 +341,18 @@ train_fn = theano.function(inputs=[in_images, in_labels], outputs=loss, updates=
 validate_fn = theano.function(inputs=[in_images, in_labels], outputs=loss)
 compute_embedding = theano.function(inputs=[in_images], outputs=image_embdeddings)
 
-# In[] Debug code goes below
-
-#theano.config.exception_verbosity='high'
-train_loss = train_fn(train_batch[:8], [train_labels[:8]])
-print(train_loss)
-valid_loss = validate_fn(train_batch[:8], [train_labels[:8]])
-print(valid_loss)
-
 # In[] Debug train loop
 i = 0
 
-train_batch, train_labels = data.train_batch(256)
-valid_set, valid_labels = data.valid_batch(256)
+batch_size=128
+train_batch, train_labels = data.train_batch(batch_size)
+valid_set, valid_labels = data.valid_batch(512)
 
-for i in range(int(50000/256)):
+for i in range(1 * int(50000/batch_size)):
     train_loss = train_fn(train_batch, [train_labels])
     valid_loss = validate_fn(train_batch, [train_labels])
     #if i % 10 == 0:
-    train_batch, train_labels = data.train_batch(256)
+    train_batch, train_labels = data.train_batch(batch_size)
     print('epoch {} loss: {}   {}'.format(i, train_loss, valid_loss))
 
 
@@ -372,12 +366,15 @@ from matplotlib.pyplot import cm
 
 colors=cm.rainbow(np.linspace(0,1,10))
 
+valid_set, valid_labels = data.valid_batch(10000)
+
 class_embeddings = np.array(compute_embedding(valid_set))
 #class_embeddings /= np.sqrt((class_embeddings * class_embeddings).sum(axis=1)).reshape(class_embeddings.shape[0], 1)
+
 for cls, color in zip(range(10),colors):
     plt.scatter(class_embeddings[valid_labels==cls,0], class_embeddings[valid_labels==cls,1],
                 c=color, #valid_labels[valid_labels==cls],
-                marker='${}$'.format(cls), s=50, linewidths=0.1, edgecolor='black')
+                marker='${}$'.format(cls), s=100, linewidths=0.1, edgecolor='black')
 
 plt.legend()
 plt.show()
