@@ -131,21 +131,21 @@ def nca_loss(targets, embeddings, proxies_layer):
     from misc import distance_matrix
     from misc import l2
 
-    embeddings_normed = embeddings / l2(embeddings)
+    embeddings_normed = embeddings / (l2(embeddings) + 0.0001)
     # Positive distances
     target_proxies = lasagne.layers.get_output(proxies_layer, in_labels)[0]
-    target_proxies_normed = target_proxies / l2(target_proxies)
+    target_proxies_normed = target_proxies / (l2(target_proxies) + 0.0001)
 
     positive_distances = T.diagonal(distance_matrix(target_proxies_normed, embeddings_normed))
     numerator = T.exp(-positive_distances)
 
     # Negative distances
-    proxies_normed = proxies_layer.W / l2(proxies_layer.W)
+    proxies_normed = proxies_layer.W / (l2(proxies_layer.W) + 0.0001)
     all_distances = distance_matrix(embeddings_normed, proxies_normed)
     denominator = T.sum(T.exp(-all_distances), axis=1) - numerator
 
     # Compute ratio
-    loss_vector = -T.log(numerator / denominator)
+    loss_vector = -T.log(numerator / (denominator + 0.0001))
     loss = T.mean(loss_vector)
     return loss
 
@@ -292,43 +292,98 @@ def build_cnn(input_var=None):
 
     # Convolutional layer with 32 kernels of size 5x5. Strided and padded
     # convolutions are supported as well; see the docstring.
-    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(5, 5), nonlinearity=lasagne.nonlinearities.leaky_rectify,
-                                         W=lasagne.init.GlorotUniform())
+    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(3, 3), nonlinearity=lasagne.nonlinearities.rectify)
     network = lasagne.layers.MaxPool2DLayer(network, pool_size=(2, 2))
 
-    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(5, 5), nonlinearity=lasagne.nonlinearities.leaky_rectify,
-                                         W=lasagne.init.GlorotUniform())
+    network = lasagne.layers.Conv2DLayer(network, num_filters=32, filter_size=(3, 3), nonlinearity=lasagne.nonlinearities.rectify)
     network = lasagne.layers.MaxPool2DLayer(network, pool_size=(2, 2))
+
+    network = lasagne.layers.Conv2DLayer(network, num_filters=64, filter_size=(3, 3), nonlinearity=lasagne.nonlinearities.rectify)
+#    network = lasagne.layers.MaxPool2DLayer(network, pool_size=(2, 2))
+
+    network = lasagne.layers.Conv2DLayer(network, num_filters=64, filter_size=(3, 3), nonlinearity=lasagne.nonlinearities.rectify)
+
+#    network = lasagne.layers.Conv2DLayer(network, num_filters=64, filter_size=(4, 4), nonlinearity=lasagne.nonlinearities.rectify)
 
     # A fully-connected layer of 256 units with 50% dropout on its inputs:
-    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.5), num_units=8, nonlinearity=lasagne.nonlinearities.leaky_rectify)
-    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.01), num_units=2, nonlinearity=lasagne.nonlinearities.tanh)
+    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.035), num_units=128, nonlinearity=lasagne.nonlinearities.rectify)
 
-    # And, finally, the 10-unit output layer with 50% dropout on its inputs:
-#    network = lasagne.layers.DenseLayer(
-#            lasagne.layers.dropout(network, p=.5),
-#            num_units=10,
-#            nonlinearity=lasagne.nonlinearities.softmax)
+#    classification_layer = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.5),
+#        num_units=10,
+#        nonlinearity=lasagne.nonlinearities.softmax)
 
-    return network, input_layer
+    network = lasagne.layers.DenseLayer(lasagne.layers.dropout(network, p=.035), num_units=2, nonlinearity=lasagne.nonlinearities.linear)
+
+
+    return network, input_layer #, classification_layer
+
+# In[]
+def nca_loss(targets, embeddings, proxies_layer):
+    """Return the NCA loss for No Fuss DML.
+    For details, we refer you to 'Neighbourhood Component Analysis' by
+    J Goldberger, S Roweis, G Hinton, R Salakhutdinov (2004).
+    Parameters
+    ----------
+    targets : Theano variable
+        An array of shape ``(n,)`` where ``n`` is the number of samples. Each
+        entry of the array should be an integer between ``0`` and ``k - 1``,
+        where ``k`` is the number of classes.
+    embeddings : Theano variable
+        An array of shape ``(n, d)`` where each row represents a point in``d``-dimensional space.
+    proxies_layer : Lasagne embedding layer
+        Should contain An array of shape ``(m, d)`` where each row represents a proxy-point in``d``-dimensional space.
+    Returns
+    -------
+    res : Theano variable
+        Scalar containing loss value.
+    """
+
+    from misc import distance_matrix
+    from misc import l2
+
+
+    def normalize_rowwise(mat):
+        return mat / (l2(mat, axis=1).reshape((mat.shape[0], 1)) + 1e-8)
+
+    embeddings_normed = normalize_rowwise(embeddings)
+    # Positive distances
+    target_proxies = lasagne.layers.get_output(proxies_layer, in_labels)[0]
+    target_proxies_normed = normalize_rowwise(target_proxies)
+
+    positive_distances = T.diagonal(distance_matrix(target_proxies_normed, embeddings_normed))
+    numerator = T.exp(-positive_distances)
+
+    # Negative distances
+    proxies_normed = normalize_rowwise(proxies_layer.W)
+    all_distances = distance_matrix(embeddings_normed, proxies_normed)
+    denominator = T.sum(T.exp(-all_distances), axis=1) - numerator
+
+    # Compute ratio
+    loss_vector = -T.log(numerator / (denominator + 1e-8))
+    loss = T.mean(loss_vector)
+    return loss
 
 # In[]
 
-#l_in_images = T.tensor4('inputs')
-#l_in_labels = T.ivector('targets')
 l_in_labels = lasagne.layers.InputLayer((None,))
+
 embedding_layer, l_in_images = build_cnn()
 
 n_train_classes = len(data.train_classes)
+
 init_proxies = np.random.randn(len(data.train_classes), embedding_layer.output_shape[1]).astype('float32')
 proxies_layer = lasagne.layers.EmbeddingLayer(l_in_labels, input_size=n_train_classes, output_size=embedding_layer.output_shape[1], W=init_proxies)
 
 ## In[]
 in_images = l_in_images.input_var
 in_labels = T.imatrix()
-image_embdeddings = lasagne.layers.get_output(embedding_layer)
 
-loss = nca_loss(in_labels, image_embdeddings, proxies_layer)
+nca_loss
+
+image_embeddings = lasagne.layers.get_output(embedding_layer)
+image_embeddings_determenistic = lasagne.layers.get_output(embedding_layer, deterministic=True)
+
+loss = nca_loss(in_labels, image_embeddings, proxies_layer)
 
 params = lasagne.layers.get_all_params([proxies_layer, embedding_layer], trainable=True)
 
@@ -339,7 +394,7 @@ updates = lasagne.updates.rmsprop(loss, params, learning_rate=0.001)
 ## In[]
 train_fn = theano.function(inputs=[in_images, in_labels], outputs=loss, updates=updates)
 validate_fn = theano.function(inputs=[in_images, in_labels], outputs=loss)
-compute_embedding = theano.function(inputs=[in_images], outputs=image_embdeddings)
+compute_embedding = theano.function(inputs=[in_images], outputs=image_embeddings_determenistic)
 
 # In[] Debug train loop
 i = 0
@@ -348,10 +403,17 @@ batch_size=128
 train_batch, train_labels = data.train_batch(batch_size)
 valid_set, valid_labels = data.valid_batch(512)
 
-for i in range(1 * int(50000/batch_size)):
+for i in range(int(5 * 50000/batch_size)):
+#    if i < 25 and i % 5 == 0:
+#        print("plot")
+#        plot_stuff(i)
+#    elif i % 50 == 0:
+#        print("plot")
+#        plot_stuff(i)
     train_loss = train_fn(train_batch, [train_labels])
     valid_loss = validate_fn(train_batch, [train_labels])
-    #if i % 10 == 0:
+    del train_batch
+    del train_labels
     train_batch, train_labels = data.train_batch(batch_size)
     print('epoch {} loss: {}   {}'.format(i, train_loss, valid_loss))
 
@@ -364,20 +426,33 @@ plt.scatter(proxies[:,0], proxies[:,1], s=50)
 # In[]
 from matplotlib.pyplot import cm
 
-colors=cm.rainbow(np.linspace(0,1,10))
+def plot_stuff(save=None):
+    colors=cm.rainbow(np.linspace(0,1,10))
 
-valid_set, valid_labels = data.valid_batch(10000)
+    valid_set, valid_labels = data.valid_batch(2000)
 
-class_embeddings = np.array(compute_embedding(valid_set))
-#class_embeddings /= np.sqrt((class_embeddings * class_embeddings).sum(axis=1)).reshape(class_embeddings.shape[0], 1)
+    class_embeddings = np.array(compute_embedding(valid_set))
+    plt.figure(figsize=(18,9))
+    for cls, color in zip(range(10),colors):
+        current_points = class_embeddings[valid_labels==cls]
+        if save is not None:
+            plt.title('Iteration {}'.format(save))
+        plt.subplot(121).scatter(current_points[:,0], current_points[:,1],
+                    c=color, #valid_labels[valid_labels==cls],
+                    marker='${}$'.format(cls), s=100, linewidths=0.1, edgecolor='black')
 
-for cls, color in zip(range(10),colors):
-    plt.scatter(class_embeddings[valid_labels==cls,0], class_embeddings[valid_labels==cls,1],
+        current_points /= np.sqrt((current_points * current_points).sum(axis=1)).reshape(current_points.shape[0], 1)
+        plt.subplot(122).scatter(current_points[:1000,0], current_points[:1000,1],
                 c=color, #valid_labels[valid_labels==cls],
                 marker='${}$'.format(cls), s=100, linewidths=0.1, edgecolor='black')
+    plt.legend()
+    if save is not None:
+        plt.savefig('pics/{}.png'.format(save))
+        plt.close()
+    else:
+        plt.show()
 
-plt.legend()
-plt.show()
+plot_stuff()
 
 # In[]
 
