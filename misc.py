@@ -6,6 +6,7 @@ Created on Tue Mar 28 12:56:38 2017
 Stolen from https://github.com/breze-no-salt/breze/blob/master/breze/arch/component
 """
 
+import lasagne
 import theano.tensor as T
 
 def lookup(what, where, default=None):
@@ -106,3 +107,49 @@ def distance_matrix_by_diff(diff, norm=l2):
 #        norm = lookup(norm, norm_)
     dist_comps = norm(diff, axis=1)
     return dist_comps
+
+
+def nca_loss(targets, embeddings, proxies_layer):
+    """Return the NCA loss for No Fuss DML.
+    For details, we refer you to 'Neighbourhood Component Analysis' by
+    J Goldberger, S Roweis, G Hinton, R Salakhutdinov (2004).
+    Parameters
+    ----------
+    targets : Theano variable
+        An array of shape ``(n,)`` where ``n`` is the number of samples. Each
+        entry of the array should be an integer between ``0`` and ``k - 1``,
+        where ``k`` is the number of classes.
+    embeddings : Theano variable
+        An array of shape ``(n, d)`` where each row represents a point in``d``-dimensional space.
+    proxies_layer : Lasagne embedding layer
+        Should contain An array of shape ``(m, d)`` where each row represents a proxy-point in``d``-dimensional space.
+    Returns
+    -------
+    res : Theano variable
+        Scalar containing loss value.
+    """
+
+    from misc import distance_matrix
+    from misc import l2
+
+
+    def normalize_rowwise(mat):
+        return mat / (l2(mat, axis=1).reshape((mat.shape[0], 1)) + 1e-8)
+
+    embeddings_normed = normalize_rowwise(embeddings)
+    # Positive distances
+    target_proxies = lasagne.layers.get_output(proxies_layer, targets)[0]
+    target_proxies_normed = normalize_rowwise(target_proxies)
+
+    positive_distances = T.diagonal(distance_matrix(target_proxies_normed, embeddings_normed))
+    numerator = T.exp(-positive_distances)
+
+    # Negative distances
+    proxies_normed = normalize_rowwise(proxies_layer.W)
+    all_distances = distance_matrix(embeddings_normed, proxies_normed)
+    denominator = T.sum(T.exp(-all_distances), axis=1) - numerator
+
+    # Compute ratio
+    loss_vector = -T.log(numerator / (denominator + 1e-8))
+    loss = T.mean(loss_vector)
+    return loss

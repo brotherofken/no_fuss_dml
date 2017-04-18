@@ -1,9 +1,11 @@
-# In[]
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
-
+import time
 import numpy as np
 import scipy as sp
 from scipy import ndimage
+import scipy.io as sio
 from scipy import misc
 import pickle
 
@@ -39,21 +41,21 @@ inception_net, embedding_layer, mean, compute_embedding = compile_model_features
 # In[]
 # generalize to other datasets
 class Dataset:
-    def __init__(self, path):
+    def __init__(self, path='/home/rakhunzy/workspace/data/cars196'):
         self.path = path
+        annotations = sio.loadmat(os.path.join(path,'cars_annos.mat'))['annotations']
+        self.img_paths = [a['relative_im_path'][0] for a in annotations[0]]
+        self.labels = np.array([a['class'][0][0] for a in annotations[0]]) - 1
+        self.uniq_labels = np.unique(self.labels)
+        self.train_classes = self.uniq_labels[:len(self.uniq_labels)//2]
+        self.n_classes = len(self.uniq_labels)
 
-        self.train_classes = np.array(range(100)) + 1
-
-        # We could preload whole birds dataset to memory
-        with open(os.path.join(self.path, 'image_class_labels.txt'), 'r') as f:
-            lines = [l.rstrip('\n').split(' ') for l in f.readlines()]
-            self.imgid2class = {int(l[0]): int(l[1]) for l in lines}
-
-        with open(os.path.join(self.path, 'images.txt'), 'r') as f:
-            lines = [l.rstrip('\n').split(' ') for l in f.readlines()]
-            self.imgid2image = {int(l[0]):os.path.join(path, 'images', l[1]) for l in lines}
-
-        self.n_classes = len(np.unique(np.array(list(self.imgid2class.values()))))
+    def _load_preprocess_img(self, imgpath):
+        from inception_v3 import preprocess
+        img = sp.ndimage.imread(os.path.join(self.path, imgpath))
+        if len(img.shape)==2:
+            img = np.rollaxis(np.stack([img, img, img]), 0, 3)
+        return preprocess(img)
 
     def _gen_data(self, size, filter_fn):
         from inception_v3 import preprocess
@@ -62,38 +64,22 @@ class Dataset:
         labels = []
 
         while len(images) < size:
-            imgid = np.random.randint(len(self.imgid2image)) + 1
-            imgpath = self.imgid2image[imgid]
-            imgclass = self.imgid2class[imgid]
-            img = sp.ndimage.imread(imgpath)
+            imgid = np.random.randint(len(self.img_paths))
+            imgpath = self.img_paths[imgid]
+            imgclass = self.labels[imgid]
 
-            # fix for grayscale images
-            if len(img.shape)==2:
-                img = np.rollaxis(np.stack([img, img, img]), 0, 3)
-
-            if filter_fn(imgid, imgclass):
-                imgids.append(imgid)
-                images.append(preprocess(img))
-                labels.append(imgclass)
-        return np.concatenate(images), np.array(labels).astype(np.int32)
-
-    def images_for_class(self, cid):
-        from inception_v3 import preprocess
-        images = []
-
-        for imgid, imgclass in self.imgid2class.items():
-            if imgclass != cid:
+            if not filter_fn(imgid, imgclass) and imgid not in imgids:
                 continue
-            imgpath = self.imgid2image[imgid]
-            img = sp.ndimage.imread(imgpath)
 
-            # fix for grayscale images
+            img = sp.ndimage.imread(os.path.join(self.path, imgpath))
+
             if len(img.shape)==2:
                 img = np.rollaxis(np.stack([img, img, img]), 0, 3)
 
+            imgids.append(imgid)
             images.append(preprocess(img))
-
-        return np.vstack(images)
+            labels.append(imgclass)
+        return np.concatenate(images), np.array(labels).astype(np.int32)
 
     def train_batch(self, size=32):
         return self._gen_data(size, lambda i, c: c in self.train_classes)
@@ -101,10 +87,27 @@ class Dataset:
     def valid_batch(self, size=1024):
         return self._gen_data(size, lambda i, c: c not in self.train_classes)
 
+    def iterate_minibatches(self, batchsize, shuffle=True, train=True):
+        indices = []
+        if train:
+            indices = np.argwhere(np.in1d(data.labels, data.train_classes))
+        else:
+            indices = np.argwhere(np.logical_not(np.in1d(data.labels, data.train_classes)))
 
-data = Dataset('/home/rakhunzy/workspace/data/CUB_200_2011')
+        if shuffle:
+            np.random.shuffle(indices)
 
-# In[]
+        for start_idx in range(0, len(self.img_paths) - batchsize + 1, batchsize):
+            excerpt = indices[start_idx:start_idx + batchsize]
+            images = [self._load_preprocess_img(self.img_paths[int(i)]) for i in excerpt]
+            if len(images) == batchsize:
+                yield np.concatenate(images), np.array(self.labels[excerpt]).astype(np.int32).T
+            else:
+                raise StopIteration
+
+data = Dataset()
+
+    # In[]
 train_batch, train_labels = data.train_batch(32)
 valid_set, valid_labels = data.valid_batch(128)
 
@@ -144,22 +147,68 @@ updates = lasagne.updates.rmsprop(loss, params, learning_rate=0.001)
 
 #[i.__dict__['type'] for i in params]
 
+print('Function compilation')
+print('    train_fn')
 train_fn = theano.function(inputs=[in_images, in_labels], outputs=loss, updates=updates)
+print('    validate_fn')
 validate_fn = theano.function(inputs=[in_images, in_labels], outputs=loss)
-
-# In[] Debug code goes below
-
-#theano.config.exception_verbosity='high'
-train_loss = train_fn(train_batch[:8], [train_labels[:8]-1])
-valid_loss = validate_fn(train_batch[:8], [train_labels[:8]-1])
-print(train_loss)
-
-# In[]
+print('    embedding_fn')
 embedding_fn = theano.function(inputs=[in_images], outputs=image_embdeddings)
+print('Done')
+
+# In[] Main train loop
+train_batch_errors =[]
+valiation_errors = []
+last_epoch = 0
+
+# In[]
+num_epochs = 50
+for epoch in range(last_epoch + 1, last_epoch + 1 + num_epochs):
+    # In each epoch, we do a full pass over the training data:
+    train_err = 0
+    train_batches = 0
+    start_time = time.time()
+    batch_errors = []
+    for batch in data.iterate_minibatches(20, shuffle=True):
+        inputs, targets = batch
+        batch_loss = train_fn(inputs, targets)
+        batch_errors.append(batch_loss)
+        train_err += batch_loss
+        train_batches += 1
+        if train_batches % 50 == 0:
+            print("Batch {} loss: {}.".format(train_batches, batch_loss))
+    train_batch_errors.append(batch_errors)
+    # And a full pass over the validation data:
+    val_err = 0
+    val_batches = 0
+    # validion set has another classes, so validate on train
+    for batch in data.iterate_minibatches(64, shuffle=False, train=True):
+        inputs, targets = batch
+        err = validate_fn(inputs, targets)
+        val_err += err
+        val_batches += 1
+        if train_batches % 50 == 0:
+            print("{} batches done.".format(val_batches))
+    valiation_errors.append(val_err / val_batches)
+    # Then we print the results for this epoch:
+    print("Epoch {} of {} took {:.3f}s".format(epoch + 1, num_epochs, time.time() - start_time))
+    print("  training loss:\t\t{:.6f}".format(train_err / train_batches))
+    print("  validation loss:\t\t{:.6f}".format(val_err / val_batches))
+    np.savez('models/cars_196_weights_{}.npz'.format(epoch), *lasagne.layers.get_all_params([proxies_layer, embedding_layer], trainable=True))
+last_epoch = epoch
 
 # In[]
 
-valid_embedding = embedding_fn(valid_set[:16])
+#plt.plot(np.concatenate(train_batch_errors))
+plt.plot(valiation_errors)
+plt.grid()
+
+
+# In[] Check proxy values
+proxies = np.array(proxies_layer.W.eval())
+for i in range(len(proxies)):
+    print((proxies[0] - init_proxies[0]).sum())
+
 
 
 # In[]
@@ -170,13 +219,13 @@ valid_labels = []
 from inception_v3 import preprocess
 
 i = 0
-for imgid, imgclass in data.imgid2class.items():
+for imgpath, imgclass in zip(data.img_paths, data.labels):
     i += 1
     if imgclass in data.train_classes:
         continue
-    imgpath = data.imgid2image[imgid]
-    label = data.imgid2class[imgid]
-    img = sp.ndimage.imread(imgpath)
+    #imgpath = data.imgid2image[imgid]
+    label = imgclass #data.imgid2class[imgid]
+    img = sp.ndimage.imread(os.path.join(data.path, imgpath))
 
     # fix for grayscale images
     if len(img.shape)==2:
@@ -184,7 +233,7 @@ for imgid, imgclass in data.imgid2class.items():
     valid_embeddings.append(embedding_fn(preprocess(img)))
     valid_labels.append(label)
     if i % 10 == 0:
-        print('{}/{}'.format(i, len(data.imgid2class)))
+        print('{}/{}'.format(i, len(data.img_paths)))
 
 # In[]
 valid_embeddings = np.concatenate(valid_embeddings)
@@ -194,7 +243,6 @@ valid_labels = np.array(valid_labels)
 from sklearn import metrics
 import sklearn as ski
 
-
 valid_embeddings_distances = ski.metrics.pairwise.euclidean_distances(valid_embeddings, valid_embeddings)
 
 # In[]
@@ -202,31 +250,11 @@ valid_embeddings_distances_sorted = np.argsort(valid_embeddings_distances, axis=
 
 labels_retrievals = valid_labels[valid_embeddings_distances_sorted]
 
-k=8
-np.count_nonzero(np.sum(np.array([labels_retrievals[:,0] == labels_retrievals[:,i+1] for i in range(8)]), axis=0)) / np.count_nonzero(valid_labels)
+k=1
+np.count_nonzero(np.sum(np.array([labels_retrievals[:,0] == labels_retrievals[:,i+1] for i in range(k)]), axis=0)) / np.count_nonzero(valid_labels)
 
 # In[]
 plt.matshow(valid_embeddings_distances)
-
-# In[] Debug train loop
-i = 0
-for i in range(5000):
-    train_batch, train_labels = data.train_batch(16)
-    train_loss = train_fn(train_batch, [train_labels-1])
-    valid_loss = 0 #validate_fn(valid_set[:16], [valid_labels[:16]-1])
-    print('epoch {} loss: {}  {}'.format(i, train_loss, valid_loss))
-    #class_embeddings = np.array(compute_embedding(class_images))
-    #class_embeddings_mean = np.array(class_embeddings.mean(axis=0))
-    #print(np.sum(class_embeddings_mean - init_proxies[-1]))
-
-# In[] Check proxy values
-proxies = np.array(proxies_layer.W.eval())
-for i in range(len(proxies)):
-    print((proxies[0] - init_proxies[0]).sum())
-
-
-
-
 
 
 
