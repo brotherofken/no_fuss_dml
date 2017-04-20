@@ -141,11 +141,12 @@ image_embdeddings = lasagne.layers.get_output(linear_embedding_layer)
 
 loss = nca_loss(in_labels, image_embdeddings, proxies_layer)
 
-params = lasagne.layers.get_all_params([proxies_layer, embedding_layer], trainable=True)
+params = lasagne.layers.get_all_params([proxies_layer, linear_embedding_layer, embedding_layer], trainable=True) # embedding_layer,
+#params += linear_embedding_layer.get_params()
 
 updates = lasagne.updates.rmsprop(loss, params, learning_rate=0.001)
 
-#[i.__dict__['type'] for i in params]
+len([i.__dict__['type'] for i in params])
 
 print('Function compilation')
 print('    train_fn')
